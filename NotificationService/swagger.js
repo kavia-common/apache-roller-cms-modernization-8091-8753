@@ -19,4 +19,33 @@ const options = {
 };
 
 const swaggerSpec = swaggerJSDoc(options);
+
+// Inject /health doc so it appears in Swagger UI
+swaggerSpec.paths = swaggerSpec.paths || {};
+swaggerSpec.paths['/health'] = {
+  get: {
+    summary: 'Health endpoint',
+    description: 'Service liveness/readiness basic check.',
+    tags: ['Health'],
+    responses: {
+      200: {
+        description: 'Service health check passed',
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                status: { type: 'string', example: 'ok' },
+                message: { type: 'string', example: 'Service is healthy' },
+                timestamp: { type: 'string', format: 'date-time' },
+                environment: { type: 'string', example: 'development' }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
 module.exports = swaggerSpec;

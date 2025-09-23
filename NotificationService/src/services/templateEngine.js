@@ -15,6 +15,7 @@ class TemplateEngine {
      * - locale: e.g., 'en', 'fr'
      * - data: object of variables
      * Returns: { subject, html }
+     * SECURITY: Caller must ensure data is sanitized for HTML content.
      */
     const root = path.join(__dirname, '..', 'templates', templateKey);
     const localeHtml = path.join(root, `${locale}.html`);
@@ -33,7 +34,8 @@ class TemplateEngine {
     return { subject: renderedSubject, html: renderedHtml };
   }
 
-  interpolate(str, data) {
+  // PUBLIC_INTERFACE
+  _interpolate(str, data) {
     return str.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
       const val = key.split('.').reduce((acc, k) => (acc && acc[k] !== undefined ? acc[k] : undefined), data);
       return (val !== undefined && val !== null) ? String(val) : '';
