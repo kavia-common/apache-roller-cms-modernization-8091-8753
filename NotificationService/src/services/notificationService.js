@@ -2,7 +2,7 @@
 const { v4: uuidv4 } = require('uuid');
 const cfg = require('../config');
 const templateEngine = require('./templateEngine');
-const { getProvider } = require('./providers');
+const { getProviders } = require('./providers');
 const store = require('../models/store');
 
 const metrics = {
@@ -20,6 +20,14 @@ function incByTemplate(template) {
 
 function backoffDelay(attempt) {
   return cfg.retry.baseDelayMs * Math.pow(2, attempt - 1);
+}
+
+function redact(value) {
+  if (!value) return value;
+  const str = String(value);
+  const at = str.indexOf('@');
+  if (at > 1) return `${str[0]}***${str.slice(at - 1)}`;
+  return str.length > 4 ? `${str.slice(0, 1)}***${str.slice(-1)}` : '***';
 }
 
 class NotificationService {
@@ -58,7 +66,7 @@ class NotificationService {
       ts: createdAt,
       type: 'notification_created',
       id: notifId,
-      recipient,
+      recipient: redact(recipient),
       template,
       locale: rec.locale,
     });
@@ -86,34 +94,64 @@ class NotificationService {
     const now = new Date().toISOString();
 
     try {
-      // Render
+      // Render localized template with fallback
       const { subject, html } = templateEngine.render(record.template, record.locale, record.data);
 
-      // Send
-      const provider = getProvider();
-      const result = await provider.send({
-        to: record.recipient,
-        subject,
-        html,
-        from: record.data.from || undefined,
-      });
+      // Try providers in order for failover within the same attempt
+      const providers = getProviders();
+      let lastError = null;
+      for (const provider of providers) {
+        try {
+          const result = await provider.send({
+            to: record.recipient,
+            subject,
+            html,
+            from: record.data.from || undefined,
+          });
 
-      // Success
-      store.addAttempt(record.id, {
-        ts: now, outcome: 'success', attempt: attemptNo, provider: result.provider, messageId: result.messageId,
-      });
+          // Success
+          store.addAttempt(record.id, {
+            ts: now,
+            outcome: 'success',
+            attempt: attemptNo,
+            provider: result.provider,
+            messageId: result.messageId,
+          });
 
-      store.updateNotification(record.id, {
-        status: 'sent',
-        attempts: attemptNo,
-        updatedAt: now,
-        providerMessageId: result.messageId || null,
-        lastError: null,
-      });
+          store.updateNotification(record.id, {
+            status: 'sent',
+            attempts: attemptNo,
+            updatedAt: now,
+            providerMessageId: result.messageId || null,
+            lastError: null,
+          });
 
-      metrics.sent += 1;
-      incByTemplate(record.template);
-      store.addAudit({ ts: now, type: 'notification_sent', id: record.id, provider: result.provider, messageId: result.messageId });
+          metrics.sent += 1;
+          incByTemplate(record.template);
+          store.addAudit({
+            ts: now,
+            type: 'notification_sent',
+            id: record.id,
+            provider: result.provider,
+            messageId: result.messageId,
+          });
+          return; // stop after first successful provider
+        } catch (provErr) {
+          lastError = provErr;
+          store.addAudit({
+            ts: now,
+            type: 'provider_failure',
+            id: record.id,
+            provider: provider.name || 'unknown',
+            error: provErr && provErr.message ? provErr.message : String(provErr),
+            attempt: attemptNo,
+          });
+          // continue to next provider
+        }
+      }
+
+      // If we got here, all providers failed for this attempt
+      throw lastError || new Error('All providers failed');
     } catch (err) {
       // Failure
       const msg = err && err.message ? err.message : String(err);
@@ -138,7 +176,7 @@ class NotificationService {
         return this._dispatch(record.id);
       }
       metrics.failed += 1;
-      // Dead-letter (in real impl., push to DLQ)
+      // In production, this could be published to a DLQ for manual intervention.
     }
   }
 
